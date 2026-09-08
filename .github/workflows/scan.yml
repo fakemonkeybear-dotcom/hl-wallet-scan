@@ -30,7 +30,7 @@ jobs:
         run: pip install requests pandas numpy
 
       - name: Run scan
-        run: python scripts/stage1_scan.py
+        run: python -u scripts/stage1_scan.py
 
       - name: Commit and push results
         run: |

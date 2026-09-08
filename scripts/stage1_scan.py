@@ -1,11 +1,11 @@
-import requests, time, pandas as pd, numpy as np, json, os, sys
+import requests, time, pandas as pd, numpy as np, json, os
 from datetime import datetime, timezone
 
 API_URL = "https://api.hyperliquid.xyz/info"
 WALLETS_FILE = "wallets.txt"
 RESULTS_FILE = "state/results.csv"
 CHECKPOINT_FILE = "state/checkpoint.json"
-TIME_BUDGET_SECONDS = 5 * 60 * 60  # stop after 5 hours, leave buffer under GH's 6hr hard cap
+TIME_BUDGET_SECONDS = 5 * 60 * 60
 
 def hl_post(body, retries=4):
     for i in range(retries):
@@ -52,10 +52,7 @@ def analyze_wallet(addr):
         row["num_closing_trades"] = len(closed)
         row["win_rate_%"] = round(100 * (closed["closedPnl"] > 0).mean(), 1) if len(closed) else None
 
-        if "liquidation" in df.columns:
-            row["num_liquidations"] = int(df["liquidation"].notna().sum())
-        else:
-            row["num_liquidations"] = 0
+        row["num_liquidations"] = int(df["liquidation"].notna().sum()) if "liquidation" in df.columns else 0
 
         row["first_trade"] = df["time"].min()
         row["last_trade"] = df["time"].max()
@@ -81,16 +78,26 @@ def load_wallets():
     with open(WALLETS_FILE) as f:
         return [line.strip() for line in f if line.strip()]
 
-def load_checkpoint():
-    if os.path.exists(CHECKPOINT_FILE):
-        with open(CHECKPOINT_FILE) as f:
-            return json.load(f)
-    return {"last_index": -1}
+def load_already_done():
+    """Source of truth: whatever wallets are ALREADY in results.csv.
+    This makes the script safe even if checkpoint.json is lost/reset -
+    it will never re-scan or duplicate a wallet that's already recorded."""
+    if os.path.exists(RESULTS_FILE):
+        try:
+            existing = pd.read_csv(RESULTS_FILE, usecols=["wallet"])
+            return set(existing["wallet"].astype(str))
+        except Exception:
+            return set()
+    return set()
 
-def save_checkpoint(idx):
+def save_checkpoint(done_count, total):
     os.makedirs("state", exist_ok=True)
     with open(CHECKPOINT_FILE, "w") as f:
-        json.dump({"last_index": idx, "updated": datetime.now(timezone.utc).isoformat()}, f)
+        json.dump({
+            "wallets_done": done_count,
+            "total_wallets": total,
+            "updated": datetime.now(timezone.utc).isoformat()
+        }, f)
 
 def append_result(row):
     os.makedirs("state", exist_ok=True)
@@ -100,33 +107,37 @@ def append_result(row):
 
 def main():
     wallets = load_wallets()
-    checkpoint = load_checkpoint()
-    start_idx = checkpoint["last_index"] + 1
     total = len(wallets)
+    already_done = load_already_done()
 
-    print(f"Total wallets: {total}. Resuming from index {start_idx}.")
+    print(f"Total wallets: {total}. Already recorded in results.csv: {len(already_done)}.")
+
+    remaining = [w for w in wallets if w not in already_done]
+    print(f"Remaining to process: {len(remaining)}.")
 
     start_time = time.time()
     processed_this_run = 0
 
-    for idx in range(start_idx, total):
+    for addr in remaining:
         if time.time() - start_time > TIME_BUDGET_SECONDS:
-            print(f"Time budget reached. Processed {processed_this_run} this run. Stopping at index {idx}.")
+            print(f"Time budget reached. Processed {processed_this_run} this run. Stopping.")
             break
 
-        addr = wallets[idx]
         row = analyze_wallet(addr)
         append_result(row)
-        save_checkpoint(idx)
         processed_this_run += 1
+        done_so_far = len(already_done) + processed_this_run
 
-        if idx % 25 == 0:
-            print(f"[{idx+1}/{total}] {addr} done. ({processed_this_run} this run)")
+        if processed_this_run % 25 == 0:
+            save_checkpoint(done_so_far, total)
+            print(f"[{done_so_far}/{total}] {addr} done. ({processed_this_run} this run)")
 
-        time.sleep(0.15)  # ~6-7 req/sec across the 3 calls per wallet, conservative
+        time.sleep(0.15)
 
-    print(f"Run complete. Processed {processed_this_run} wallets this run.")
-    if start_idx + processed_this_run >= total:
+    final_done = len(already_done) + processed_this_run
+    save_checkpoint(final_done, total)
+    print(f"Run complete. Processed {processed_this_run} wallets this run. Total done: {final_done}/{total}.")
+    if final_done >= total:
         print("*** ALL WALLETS COMPLETE ***")
 
 if __name__ == "__main__":

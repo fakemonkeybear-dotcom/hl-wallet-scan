@@ -7,18 +7,30 @@ RESULTS_FILE = "state/stage2_results.csv"
 OVERLAP_DATA_FILE = "state/stage2_overlap_data.csv"
 TIME_BUDGET_SECONDS = 5 * 60 * 60
 
-def hl_post(body, retries=4):
+def hl_post(body, retries=3):
+    """Standard calls (fills, state) - these matter, worth retrying properly."""
     for i in range(retries):
         try:
-            r = requests.post(API_URL, json=body, timeout=20)
+            r = requests.post(API_URL, json=body, timeout=12)
             if r.status_code == 200:
                 return r.json()
             elif r.status_code == 429:
-                time.sleep(3 * (i + 1))
+                time.sleep(1.5 * (i + 1))
             else:
-                time.sleep(1 * (i + 1))
+                time.sleep(0.5 * (i + 1))
         except Exception:
-            time.sleep(2 * (i + 1))
+            time.sleep(1 * (i + 1))
+    return None
+
+def hl_post_fast(body):
+    """For candle lookups only - fail fast, don't burn minutes retrying
+    something non-critical. One quick attempt, no backoff."""
+    try:
+        r = requests.post(API_URL, json=body, timeout=8)
+        if r.status_code == 200:
+            return r.json()
+    except Exception:
+        pass
     return None
 
 def get_fills(addr):
@@ -30,11 +42,11 @@ def get_state(addr):
 def get_candles(coin, entry_ms, lookahead_hours=3):
     start = entry_ms - 1000*60*30
     end = entry_ms + 1000*60*60*lookahead_hours
-    for interval in ["15m", "1h", "5m"]:
-        candles = hl_post({"type": "candleSnapshot", "req": {"coin": coin, "interval": interval, "startTime": start, "endTime": end}})
-        time.sleep(0.2)
-        if candles and len(candles) >= 2:
-            return candles
+    # only try ONE interval, fail fast - a missed candle just means
+    # this trade's timing can't be checked, which is fine at this scale
+    candles = hl_post_fast({"type": "candleSnapshot", "req": {"coin": coin, "interval": "15m", "startTime": start, "endTime": end}})
+    if candles and len(candles) >= 2:
+        return candles
     return None
 
 def dedupe_events(df):
@@ -92,7 +104,7 @@ def analyze_wallet(addr):
     # timing edge - top 3 wins only, to keep this feasible across 1689 wallets
     closed = df[df["closedPnl"] != 0]
     events = dedupe_events(closed)
-    top_wins = events.sort_values("closedPnl", ascending=False).head(3)
+    top_wins = events.sort_values("closedPnl", ascending=False).head(2)
     checked, favorable, moves = 0, 0, []
     for _, ev in top_wins.iterrows():
         candles = get_candles(ev["coin"], ev["time_ms"])
@@ -177,4 +189,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-  
+        
